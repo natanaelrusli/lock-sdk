@@ -1,0 +1,17 @@
+# Vendor SDK material, copied here only to build and test against.
+# Not ours to redistribute, and it contains encoder authorization data
+# (LockInfo.dll) plus logs of issued card serials (LockCard.dll,
+# cardRecord.ini). Keep all of it out of a public repository.
+build/
+
+# Raw text extracted from the vendor's 酒管软件接口说明.doc.
+# The README summarises the technical facts; the verbatim document is the
+# vendor's copyrighted material, so it stays local.
+tools/interface-spec.txt
+
+# Local build / editor noise
+*.user
+*.suo
+obj/
+bin/
+.vs/
