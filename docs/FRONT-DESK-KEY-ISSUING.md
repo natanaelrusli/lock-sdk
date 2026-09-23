@@ -141,49 +141,71 @@ to `int` in `IDD102.cs`, and rebuilt with MSBuild:
 This overwrites `bin/Debug/LockSDK_Demo.exe` with a corrected build. It's a
 legitimate bug worth keeping fixed, and worth re-applying if you ever pull a fresh
 copy of the vendor package — **but it turned out not to be what was blocking us.**
-After rebuilding, the exact same crash still happened, at the identical fault
-offset in `PubFuns.dll`. See §6b for the real cause.
+After rebuilding, the exact same crash still happened. See §6b for the real cause.
 
-## 6b. Root cause: `LockSDK.dll` / `PubFuns.dll` don't work on Windows 11
+## 6b. Root cause: x86 vendor DLLs vs. this Windows-on-ARM64 machine
 
-**Finding:** with the reader physically connected, clicking connect/read-card
-crashes the app the moment it actually touches the hardware — and this happens
-**identically across independently-written demos**:
+> **This section was revised after a direct, headless test** (2026-09-23). An
+> earlier version concluded "`LockSDK.dll`/`PubFuns.dll` don't work on Windows 11,
+> unfixable." That was too broad — the SDK loads and runs; only one code path
+> crashes, and the trigger is the CPU architecture, not the Windows version.
 
-| Demo | Crash |
+**How it was tested.** Rather than clicking through a WinForms GUI (which conflates
+the §6a marshaling bug, UI threading, and the native call), a minimal x86 .NET
+console harness was built that P/Invokes `LockSDK.dll` directly with correct
+`int`-width signatures, then run from the DLL folder so it loads the full vendor
+stack. This isolates the native call itself. Results:
+
+| Call | Result |
 |---|---|
-| C# (`LockSDK_Demo.exe`, CSharpDemo) | `0xC0000005` access violation in `PubFuns.dll`, same fault offset before and after fixing the §6a marshaling bug |
-| VB6 (`LockSDK_Demo.exe`, `build/run/VB6/`) | `0xC0000005` at a **null address** (jump through a null/garbage function pointer), then a fatal `0xC00000FF` in `ntdll.dll` |
+| `TP_Configuration(4)` — RF57 / T5557 path | Returns **`-2 NO_RW_MACHINE`** — runs to completion, no crash |
+| `TP_Configuration(5)` — MF1 / Mifare path | **Crashes `0xC0000005`** on the *first* call, before any card is touched |
 
-Two demos, two languages, two independent codebases, both written against the
-same `LockSDK.dll`/`PubFuns.dll`/USB-transport-DLL chain — both die at the same
-step. That rules out a demo-side bug. The common factor is the native vendor DLLs
-themselves, which date to roughly 2013 and were never updated for modern Windows.
-This is consistent with a legacy `GetVersionEx()`-style OS-version branch inside
-`PubFuns.dll` picking a bad code path (or an unresolved function pointer) on
-Windows 11, since the same *class* of crash (jump into invalid/null code) shows up
-both times.
+**What that tells us.** The SDK is **not** dead on this OS:
 
-**This is not fixable from this checkout** — `PubFuns.dll` and the USB transport
-DLLs are closed vendor binaries with no source available here.
+- The RF57 branch executes all the way through and returns a normal SDK error code.
+  So the DLLs load, initialize, and run under this environment.
+- The crash is **isolated to the Mifare/M1 reader path** — `RF50S.dll →
+  RC500USB.dll / MF0SIM.dll / HSDApp.dll`, the USB-HID transport — and only when it
+  actually initializes the connected reader. (Type 4 doesn't touch this reader, so
+  it fails cleanly with "no machine"; type 5 does, and dies mid-transport.)
 
-**What Windows does confirm works:** the encoder/reader itself is correctly
-detected at the OS level — it shows up as a working HID device
-(`VID_5458&PID_0002`, "AISINOCHIP", `Status: OK`, no driver errors). So this is
-purely an application-layer incompatibility, not a cabling/driver problem.
+**The trigger is the CPU architecture.** This machine is **Windows on ARM64**
+(`PROCESSOR_ARCHITECTURE=ARM64`). The vendor DLLs are **x86 (32-bit)**, so they run
+under Windows' x86-on-ARM64 emulation. The crash sits exactly in the low-level HID +
+tight-timing USB code (`HSDApp.dll` calls `HidD_*`/`SetupDi*`; `PubFuns.dll` has
+`PF_AccurateDelayMs` / `QueryPerformanceCounter`-style delay loops) — the kind of
+code most likely to break under x86 emulation. The historical GUI crashes recorded
+in WER (`mod=PubFuns.dll`, and a null-jump `mod=unknown`) are the same failure seen
+through the noisier GUI path.
 
-**Next steps, not yet tried:**
-1. Test this SDK on an older Windows version/VM (Windows 7 or 8.1 is the most
-   likely match for code this age) — confirms the theory and gives a working
-   fallback environment.
-2. Contact the vendor for a Windows 11–compatible build. Mention the specific
-   symptom (crash in `PubFuns.dll` / null function pointer on connect, exact fault
-   offsets logged in Windows Event Viewer under Application) — it's specific
-   enough that vendor support may recognize it immediately.
-3. Check whether Aisino (`VID_5458`, the reader's actual chip vendor) ships its
-   own current SDK independent of this lock vendor's wrapper — would mean
-   reimplementing the guest-card logic against a different, maintained API rather
-   than `LockSDK.dll`.
+Two things follow, and they matter:
+
+- You **cannot** make this work in-process on this ARM64 machine no matter what —
+  an x86 DLL can only be loaded by an x86 process, and here that means the emulator.
+  The failing path is inside the emulated native code, below anything we can patch.
+- It is very likely **not broken on genuine x86/x64 Windows**, because the SDK
+  clearly loads and the non-Mifare path runs fine even under emulation. The earlier
+  "unfixable on Win11" framing conflated "won't run under ARM emulation" with "won't
+  run on modern Windows."
+
+**What Windows confirms works:** the reader is correctly detected at the OS level —
+`HID\VID_5458&PID_0002\AISINOCHIP`, `Status: OK`, no driver errors. This is purely
+an application/emulation-layer failure, not a cabling or driver problem.
+
+**Next steps, in priority order:**
+1. **Run the encoder on a genuine x64 (or x86) Windows box** next to the reader —
+   even an old laptop. This is the fastest path to working cards and directly
+   confirms the emulation diagnosis. A cloud/remote PMS can then reach that box over
+   the network (see [`PMS-INTEGRATION-PLAN.md`](PMS-INTEGRATION-PLAN.md)); the ARM
+   machine never needs to load the DLL itself.
+2. Contact the vendor for an ARM64-native (or ARM64-emulation-safe) build. Mention
+   the specific symptom: `TP_Configuration(5)` access-violates in the M1/HID
+   transport under x86-on-ARM64 emulation, while `TP_Configuration(4)` returns
+   `-2` cleanly.
+3. Check whether Aisino (`VID_5458`, the reader's chip vendor) ships its own current
+   SDK — a maintained, possibly cross-architecture API to reimplement the guest-card
+   logic against, instead of this x86-only wrapper.
 
 ---
 
