@@ -7,6 +7,15 @@ This document was reconstructed from the shipped headers, DLL exports and demo s
 It is not vendor-authored. Items marked **(inferred)** are conclusions drawn from file
 contents rather than documented statements.
 
+> **This repo does not contain the SDK itself.** The vendor package — `LockSDK.dll`,
+> the support DLLs, the demo projects, `LockReg.exe`, etc. — lives locally under
+> `build/`, which is gitignored (see `.gitignore`) because it's not ours to
+> redistribute and it carries encoder authorization data. Cloning this repo on
+> another machine gets you this documentation and the `tools/` scripts only; you
+> must separately copy the `build/` tree (or at least the 89,088-byte `LockSDK.dll`
+> build plus the support DLLs from §7) onto that machine before any demo or tool
+> here can actually run.
+
 ---
 
 ## 1. Quick facts
